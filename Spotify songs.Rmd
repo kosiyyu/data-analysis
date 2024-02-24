@@ -1,0 +1,1233 @@
+---
+title: "Fnal project - Spotify songs"
+author: "Karol Kos"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Libraries
+
+```{r}
+if (!require("tidyverse")) {
+  install.packages("tidyverse")
+}
+library(tidyverse)
+
+if (!require("kableExtra")) {
+  install.packages("kableExtra")
+}
+library(kableExtra)
+
+if(!require("corrplot")) {
+ install.packages("corrplot")
+}
+library(corrplot)
+
+if(!require("gridExtra")) {
+  install.packages("gridExtra")
+}
+library(gridExtra)
+
+if(!require("tidymodels")) {
+  install.packages("tidymodels")
+}
+library(tidymodels)
+
+if (!require("vip")) {
+  install.packages("vip")
+}
+library(vip)
+
+if (!require("kknn")) {
+  install.packages("kknn")
+}
+library(kknn)
+
+if (!require("rpart.plot")) {
+  install.packages("rpart.plot")
+}
+library(rpart.plot)
+
+if (!require("pROC")) {
+  install.packages("pROC")
+}
+library(pROC)
+```
+
+## Dataset
+
+The dataset used in the project concerns Spotify songs. The original collection contains the following variables describing each song:
+
+-   track_id - song unique ID
+
+-   track_name - song name
+
+-   track_artist - song artist
+
+-   track_popularity - song Popularity (0-100) where higher is better
+
+-   track_album_id - album unique ID,
+
+-   track_album_name - song album name,
+
+-   track_album_release_date - date when album released,
+
+-   playlist_name - name of playlist,
+
+-   playlist_id - playlist ID,
+
+-   playlist_genre - playlist genre,
+
+-   playlist_subgenre - playlist subgenre,
+
+-   danceability - danceability describes how suitable a track is for dancing based on a combination of musical elements including tempo, rhythm stability, beat strength, and overall regularity (a value of 0.0 is least danceable and 1.0 is most danceable),
+
+-   energy - a measure from 0.0 to 1.0 which represents a perceptual measure of intensity and activity,
+
+-   key - the estimated overall key of the track (integers map to pitches using standard Pitch Class notation),
+
+-   loudness - the overall loudness of a track in decibels (dB),
+
+-   mode - the modality (major or minor) of a track, the type of scale from which its melodic content is derived (major is represented by 1 and minor is 0),
+
+-   speechiness - speechiness detects the presence of spoken words in a track (the more exclusively speech, the closer to 1.0 the attribute value),
+
+-   acousticness - a confidence measure from 0.0 to 1.0 of whether the track is acoustic (1.0 represents high confidence the track is acoustic),
+
+-   instrumentalness - predicts whether a track contains no vocals (the closer the instrumentalness value is to 1.0, the greater likelihood the track contains no vocal content),
+
+-   liveness - detects the presence of an audience in the recording (higher liveness values represent an increased probability that the track was performed live),
+
+-   valence - a measure from 0.0 to 1.0 describing the musical positiveness conveyed by a track (tracks with high valence sound more positive),
+
+-   tempo - the overall estimated tempo of a track in beats per minute (BPM),
+
+-   duration_ms - duration of song in milliseconds
+
+First, the data was loaded into a variable called spotify_songs, and then some of them were transformed into factor variables. The following table shows the first 100 observations:
+
+```{r}
+spotify_songs <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2020/2020-01-21/spotify_songs.csv')
+
+spotify_songs$track_id <- as.factor(spotify_songs$track_id)
+spotify_songs$track_name <- as.factor(spotify_songs$track_name)
+spotify_songs$track_artist <- as.factor(spotify_songs$track_artist)
+spotify_songs$track_album_id <- as.factor(spotify_songs$track_album_id)
+spotify_songs$track_album_name <- as.factor(spotify_songs$track_album_name)
+spotify_songs$playlist_name <- as.factor(spotify_songs$playlist_name)
+spotify_songs$playlist_id <- as.factor(spotify_songs$playlist_id)
+spotify_songs$playlist_genre <- as.factor(spotify_songs$playlist_genre)
+spotify_songs$playlist_subgenre <- as.factor(spotify_songs$playlist_subgenre)
+spotify_songs$mode <- as.factor(spotify_songs$mode)
+
+kable(spotify_songs[1:100,]) %>% 
+  kable_styling(full_width = F, position = "center", font_size = 9) %>% 
+  scroll_box(height = "300px")
+```
+
+## Data preparation
+
+In this dataset there are more observations than unique tracks (because the dataset contains information about songs and playlists where they are on, therefore if one song is on several playlists, it appears several times.)
+
+```{r}
+data.frame('Number of observations' = nrow(spotify_songs),
+           'Number of unique songs' = nrow(unique(spotify_songs[,"track_id"]))) %>%
+kable() %>% 
+  kable_styling(full_width = F, position = "center", font_size = 9)
+```
+
+In the conducted analysis, it was decided to include only unique songs, so information about the playlist, such as id, subtype, will be removed. The exception is the variable regarding the type of playlist on which the song is located. Due to the fact that one song can by included in playlists with different categories (e.g. pop and latin), it was decided to transform this variable into 6 additional zero-one variables (as many as there can be types of playlists). In addition, a new variable will be created which will provide information on how many playlists a given song is on (playlist_number). The album name and id variables will also be removed from the data. In addition, a modification was introduced for the variable specifying the release date of the album with a given song.
+
+------------------------------------------------------------------------
+
+Let’s focus only on analyzed the unique songs. However, let’s add a new variable indicating how many playlists a song has appeared on.
+
+Due to the analysis of unique songs, the variables which contain information about playlist are removed. The exception is the `playlist_genre` variable, which is converted into several zero-one variables that determine whether a song has appeared in a genre’s playlist.
+
+The variables `track_album_id`, `track_album_name` are also removed due to the large number of values that they can take.
+
+Due to the fact that sometimes the `track_album_release_date` variable has a full date and sometimes only a year, it is converted into a variable storing only the year.
+
+```{r}
+# Removing some of the variables 
+spotify_songs <- spotify_songs %>%
+  select(-c(track_album_id, track_album_name, playlist_name, playlist_id, playlist_subgenre))
+
+# Grouping data by tracks (creating a dataset with unique songs)
+# Creating new columns
+songs <- spotify_songs %>%
+  group_by(track_id, track_name, track_artist) %>%
+  summarise(playlist_number = n(),
+            genre_edm = ifelse(sum(playlist_genre=="edm")>0, 1, 0),
+            genre_latin = ifelse(sum(playlist_genre=="latin")>0, 1, 0),
+            genre_pop = ifelse(sum(playlist_genre=="pop")>0, 1, 0),
+            genre_rb = ifelse(sum(playlist_genre=="r&b")>0, 1, 0),
+            genre_rap = ifelse(sum(playlist_genre=="rap")>0, 1, 0),
+            genre_rock = ifelse(sum(playlist_genre=="rock")>0, 1, 0))
+
+songs$genre_edm <- as.factor(songs$genre_edm)
+songs$genre_latin <- as.factor(songs$genre_latin)
+songs$genre_pop <- as.factor(songs$genre_pop)
+songs$genre_rb <- as.factor(songs$genre_rb)
+songs$genre_rap <- as.factor(songs$genre_rap)
+songs$genre_rock <- as.factor(songs$genre_rock)
+
+# Combination of new columns with existing ones
+songs <- songs %>% 
+  left_join(unique(spotify_songs[,-6]),
+            by=c("track_id", "track_name", "track_artist"))
+
+# New variable - year
+songs$year <- as.numeric(substr(songs$track_album_release_date, 1, 4))  
+songs <- songs[,-12]
+
+songs <- as.data.frame(songs)
+
+# Data after transformations 
+kable(songs[1:100,]) %>% 
+  kable_styling(full_width = F, position = "center", font_size = 9) %>% 
+  scroll_box(height = "300px")
+```
+
+Types of the variables
+
+```{r}
+str(songs)
+```
+
+```{r}
+uniqueValues <- data.frame(unique_id = length(unique(songs$track_id)),
+                           unique_track_name = length(unique(songs$track_name)),
+                           unique_tract_artist = length(unique(songs$track_artist)))
+colnames(uniqueValues) <- c("Unique id", "Unique track name", "Unique tract artist")
+
+kable(uniqueValues) %>%
+  kable_styling(full_width = F, position = "center", font_size = 10)
+```
+
+On the basis of the information obtained regarding the variables, it can be concluded that there are songs with repeated titles in the analyzed data. Moreover, the number of artists is about 3 times lower than the number of all the records examined, which suggests that one performer has more songs in the analyzed data.
+
+The variables specifying the song id, song title and artist take on many different values. Therefore, they will not be used to build models.
+
+### Missing data
+
+```{r}
+sum(is.na(songs))
+```
+
+There are 8 missing values in the dataset.
+
+Observations with missing data:
+
+```{r}
+songs[is.na(songs$track_name),] %>%
+  kable() %>%
+  kable_styling(full_width = F, position = "center", font_size = 10) %>% 
+  scroll_box(height = "200px")
+```
+
+The missing values are only found in the variables: `track_name`, `track_artist`. Since both variables will not be used in the following section, it was decided to leave them unchanged.
+
+## Data analysis
+
+Basic statistics of the quantitative variables:
+
+```{r}
+songs %>%
+  select(playlist_number, track_popularity, danceability, energy, key, loudness,
+         speechiness, acousticness, instrumentalness, liveness, valence, tempo,
+         duration_ms, year) %>%
+  summary() %>%
+  kable() %>%
+  kable_styling(full_width = F, position = "center", font_size = 10) %>% 
+  scroll_box(height = "300px")
+```
+
+Interpreting the above quantitative statistics, it can be seen that most of the songs are on only one playlist, as evidenced by the value of the third quartile for the playlist_number variable.
+
+The average popularity is around 39.33, suggesting that songs generally have moderate popularity. The minimum value is 0, which means there are very low popularity songs, and the maximum value is 100, which indicates high popularity songs.
+
+The average danceability value is around 0.6534, suggesting that most songs have moderate danceability potential. The minimum value is close to zero, indicating that there are songs with low dance value, and the maximum value is close to 1, indicating songs that are very suitable for dancing.
+
+The average loudness values are around -6.818 decibels, which means that songs are usually quite loud. The minimum value is -46.448 decibels, which suggests a very low volume track, while the maximum value is 1.275 decibels, which indicates a very loud track.
+
+The average speechiness value is around 0.108, suggesting that most songs have a small amount of spoken words. The minimum value is close to zero, which means that the majority of the songs are composed of music, and the maximum value is close to 1, which suggests that the song mainly contains spoken words.
+
+The average liveness value is around 0.191, suggesting that most of the tracks were not recorded in a live concert. A minimum value close to zero indicates a low probability that the song was recorded in concert, while a maximum value close to 1 suggests that some songs were recorded during live performances.
+
+The average valence is around 0.5104, suggesting that most tracks have a neutral or moderately positive bias. A minimum value close to zero indicates songs with a negative attitude, and a maximum value close to 1 indicates songs with a positive attitude.
+
+The average tempo is around 120.96 beats per minute, suggesting a moderate pace for the songs. The minimum value is 0, which is unusual for track tempos, and the maximum value is 239.44, which indicates a very fast track.
+
+duration_ms: The median is approximately 216933 milliseconds, which is approximately 3.6 minutes. This means that most songs are of medium length. The median year is 2016, which suggests that most of the tracks are from this period. The minimum value is 1957, which means that the list includes songs from different years, and the maximum value is 2020, which indicates the presence of newer songs.
+
+Statistics of binary variables:
+
+```{r}
+songs %>%
+  select(genre_edm, genre_latin, genre_pop, genre_rb, genre_rap, genre_rock, mode) %>%
+  summary() %>%
+  kable() %>%
+  kable_styling(full_width = F, position = "center", font_size = 10)
+```
+
+|                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Basing on the statistics of binary variables, it can be seen that, among all genres, the majority belonged to genre_edm. In total, 19,5% of songs belonged to this playlist genre. For the latin genre, the percentage was assigned 16.4%, for pop 18.1%, for `genre_rb` i.e. Rhythm and Blues about 18.1%, for `genre_rap` about 19.3%, and for `genre_rock` about 15.7%. In the case of the `mode` variable, the dominant mode is present in approximately 56.5% of the playlist songs, while the minor mode is present in approximately 43.5% of the playlist songs. |
+
+Correlations between quantitative variables:
+
+```{r}
+songs %>%
+  select(playlist_number, track_popularity, danceability, energy, key, loudness, speechiness, 
+         acousticness, instrumentalness, liveness, valence, tempo, duration_ms, year) %>%
+  cor() %>%
+  round(1) %>% 
+  corrplot(method="shade", type="upper", shade.col=NA, tl.col="black", tl.srt=45, tl.cex = 0.8)
+```
+
+The most correlated variables are `energy` & `loudness` and `energy` & `acousticness`. However, the colors on the graph indicate that these are not very strong relationships.
+
+The most important information is that according to the correlation coefficients, none of the variables are correlated with the variable `track_popularity`.
+
+Boxplots for quantitative variables
+
+```{r}
+w <- ggplot(songs, aes(x=factor(0))) +
+  guides(fill=FALSE, color=FALSE) +
+  xlab(NULL) + ylab(NULL) +
+  scale_x_discrete(breaks = NULL) +
+  theme(plot.title = element_text(size = 10, hjust = 0.5))
+
+w1 <- w + geom_boxplot(aes(y=playlist_number ),fill="coral") + 
+  ggtitle("Playlist number")
+  
+w2 <- w + geom_boxplot(aes(y=track_popularity), fill="skyblue1") +
+  ggtitle("Track popularity")
+ 
+w3 <- w + geom_boxplot(aes(y=danceability), fill="lightgoldenrod1") + 
+  ggtitle("Danceability")
+
+w4 <- w + geom_boxplot(aes(y=energy),fill="seagreen3") + 
+  ggtitle("Energy") 
+
+w5 <- w + geom_boxplot(aes(y=key),fill="tan1") + 
+  ggtitle("Key") 
+
+w6 <- w + geom_boxplot(aes(y=loudness),fill="sienna") + 
+  ggtitle("Loudness") 
+
+w7 <- w + geom_boxplot(aes(y=speechiness),fill="orange") + 
+  ggtitle("Speechiness") 
+
+w8 <- w + geom_boxplot(aes(y=acousticness), fill="mediumpurple1") + 
+  ggtitle("Acousticness")
+
+w9 <- w + geom_boxplot(aes(y=instrumentalness), fill="coral") + 
+  ggtitle("Instrumentalness")
+
+w10 <- w + geom_boxplot(aes(y=liveness), fill="skyblue1") + 
+  ggtitle("Liveness")
+
+w11 <- w + geom_boxplot(aes(y=valence), fill="lightgoldenrod1") + 
+  ggtitle("Valence")
+
+w12 <- w + geom_boxplot(aes(y=tempo), fill="seagreen3") + 
+  ggtitle("Tempo")
+
+w13 <- w + geom_boxplot(aes(y=duration_ms), fill="tan1") + 
+  ggtitle("Duration")
+
+w14 <- w + geom_boxplot(aes(y=year), fill="sienna") + 
+  ggtitle("Year")
+
+grid.arrange(w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, ncol = 5, nrow = 3)
+```
+
+Histograms for quantitative variables:
+
+```{r}
+w1 <- ggplot(songs, aes(x=playlist_number),fill="coral") + geom_histogram(bins=10) + 
+  ggtitle("Playlist number") +
+  xlab(NULL) + ylab(NULL) +
+  theme(plot.title = element_text(size = 10, hjust = 0.5))
+  
+w2 <- ggplot(songs, aes(x=track_popularity), fill="skyblue1") + geom_histogram(bins=10) +
+  ggtitle("Track popularity") +
+  xlab(NULL) + ylab(NULL) +
+  theme(plot.title = element_text(size = 10, hjust = 0.5))
+ 
+w3 <- ggplot(songs, aes(x=danceability),  fill="lightgoldenrod1") + geom_histogram(bins=10) + 
+  ggtitle("Danceability") +
+  xlab(NULL) + ylab(NULL) +
+  theme(plot.title = element_text(size = 10, hjust = 0.5))
+
+w4 <- ggplot(songs, aes(x=energy), fill="seagreen3") + geom_histogram(bins=10) + 
+  ggtitle("Energy") +
+  xlab(NULL) + ylab(NULL) +
+  theme(plot.title = element_text(size = 10, hjust = 0.5))
+
+w5 <- ggplot(songs, aes(x=key),fill="tan1") + geom_histogram(bins=10) + 
+  ggtitle("Key") +
+  xlab(NULL) + ylab(NULL) +
+  theme(plot.title = element_text(size = 10, hjust = 0.5)) 
+
+w6 <- ggplot(songs, aes(x=loudness),fill="sienna") + geom_histogram(bins=10) + 
+  ggtitle("Loudness") +
+  xlab(NULL) + ylab(NULL) +
+  theme(plot.title = element_text(size = 10, hjust = 0.5)) 
+
+w7 <- ggplot(songs,aes(x=speechiness),fill="orange") + geom_histogram(bins=10) + 
+  ggtitle("Speechiness") +
+  xlab(NULL) + ylab(NULL) +
+  theme(plot.title = element_text(size = 10, hjust = 0.5)) 
+
+w8 <- ggplot(songs, aes(x=acousticness),fill="mediumpurple1") + geom_histogram(bins=10) + 
+  ggtitle("Acousticness") +
+  xlab(NULL) + ylab(NULL) +
+  theme(plot.title = element_text(size = 10, hjust = 0.5))
+
+w9 <- ggplot(songs, aes(x=instrumentalness), fill="coral") + geom_histogram(bins=10) + 
+  ggtitle("Instrumentalness") +
+  xlab(NULL) + ylab(NULL) +
+  theme(plot.title = element_text(size = 10, hjust = 0.5))
+
+w10 <- ggplot(songs, aes(x=liveness),fill="skyblue1") + geom_histogram(bins=10) + 
+  ggtitle("Liveness") +
+  xlab(NULL) + ylab(NULL) +
+  theme(plot.title = element_text(size = 10, hjust = 0.5))
+
+w11 <- ggplot(songs, aes(x=valence),fill="lightgoldenrod1") + geom_histogram(bins=10) + 
+  ggtitle("Valence") +
+  xlab(NULL) + ylab(NULL) +
+  theme(plot.title = element_text(size = 10, hjust = 0.5))
+
+w12 <- ggplot(songs, aes(x=tempo), fill="seagreen3") + geom_histogram(bins=10) + 
+  ggtitle("Tempo") +
+  xlab(NULL) + ylab(NULL) +
+  theme(plot.title = element_text(size = 10, hjust = 0.5))
+
+w13 <- ggplot(songs, aes(x=duration_ms),fill="tan1") + geom_histogram(bins=10) + 
+  ggtitle("Duration") +
+  xlab(NULL) + ylab(NULL) +
+  theme(plot.title = element_text(size = 10, hjust = 0.5))
+
+w14 <- ggplot(songs, aes(x=year), fill="sienna") + geom_histogram(bins=10) + 
+  ggtitle("Year") +
+  xlab(NULL) + ylab(NULL) +
+  theme(plot.title = element_text(size = 10, hjust = 0.5))
+
+grid.arrange(w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, ncol = 4, nrow = 4)
+```
+
+Based on the obtained box plots and histograms, it can be seen that many variables have a lot of outliers. For example, for the variable `playlist number`, the outliers start when the value of the variable is above 1.
+
+Graphs of the relationship between variable `track_popularity` and the other quantitative variables:
+
+```{r}
+w <- ggplot(songs, aes(y=track_popularity)) +
+  guides(fill=FALSE, color=FALSE) +
+  ylab("Track popularity")
+
+w1 <- w + geom_point(aes(x=playlist_number)) + 
+  xlab("Playlist number")
+ 
+w2 <- w + geom_point(aes(x=danceability)) + 
+  xlab("Danceability")
+
+w3 <- w + geom_point(aes(x=energy)) + 
+  xlab("Energy") 
+
+w4 <- w + geom_point(aes(x=key)) + 
+  xlab("Key") 
+
+w5 <- w + geom_point(aes(x=loudness)) + 
+  xlab("Loudness") 
+
+w6 <- w + geom_point(aes(x=speechiness)) + 
+  xlab("Speechiness") 
+
+w7 <- w + geom_point(aes(x=acousticness)) + 
+  xlab("Acousticness")
+
+w8 <- w + geom_point(aes(x=instrumentalness)) + 
+  xlab("Instrumentalness")
+
+w9 <- w + geom_point(aes(x=liveness)) + 
+  xlab("Liveness")
+
+w10 <- w + geom_point(aes(x=valence)) + 
+  xlab("Valence")
+
+w11 <- w + geom_point(aes(x=tempo)) + 
+  xlab("Tempo")
+
+w12 <- w + geom_point(aes(x=duration_ms)) + 
+  xlab("Duration")
+
+w13 <- w + geom_point(aes(x=year)) + 
+  xlab("Year")
+
+grid.arrange(w1, w2, w3, w4, w5, w6, w7, w8, ncol = 4, nrow = 2)
+```
+
+The above graphs confirm the conclusions drawn from the correlation coefficients. There is no linear relationship between most quantitative variables and the `track_popularity` variable. The exception is the variable `playlist_number`. The first chart shows a relationship: the higher the number of playlists, the higher the popularity of the song.
+
+```{r}
+grid.arrange(w9, w10, w11, w12, w13, ncol = 4, nrow = 2)
+```
+
+The next graphs show that there is no relationship between the other variables and variable `track_popularity`.
+
+Distribution of binary variables:
+
+```{r}
+t1 <- data.frame(Genre_edm = as.factor(c(0, 1)),
+                 value = round(summary(songs$genre_edm)/nrow(songs)*100)) %>%
+  arrange(desc(Genre_edm)) %>%
+  mutate(lab.ypos = cumsum(value) - 0.5*value)
+
+w1 <- ggplot(t1, aes(x = "", y = value, fill = Genre_edm)) +
+  geom_bar(width = 1, stat = "identity") +
+  coord_polar("y", start = 0)+
+  geom_text(aes(y = lab.ypos, label = paste0(value, "%")))+
+  theme_void()
+  
+
+t2 <- data.frame(Genre_latin = as.factor(c(0, 1)),
+                 value = round(summary(songs$genre_latin)/nrow(songs)*100)) %>%
+  arrange(desc(Genre_latin)) %>%
+  mutate(lab.ypos = cumsum(value) - 0.5*value)
+
+w2 <- ggplot(t2, aes(x = "", y = value, fill = Genre_latin)) +
+  geom_bar(width = 1, stat = "identity") +
+  coord_polar("y", start = 0)+
+  geom_text(aes(y = lab.ypos, label = paste0(value, "%")))+
+  theme_void()
+
+t3 <- data.frame(Genre_pop = as.factor(c(0, 1)),
+                 value = round(summary(songs$genre_pop)/nrow(songs)*100)) %>%
+  arrange(desc(Genre_pop)) %>%
+  mutate(lab.ypos = cumsum(value) - 0.5*value)
+
+w3 <- ggplot(t3, aes(x = "", y = value, fill = Genre_pop)) +
+  geom_bar(width = 1, stat = "identity") +
+  coord_polar("y", start = 0)+
+  geom_text(aes(y = lab.ypos, label = paste0(value, "%")))+
+  theme_void() 
+
+t4 <- data.frame(Genre_rb = as.factor(c(0, 1)),
+                 value = round(summary(songs$genre_rb)/nrow(songs)*100)) %>%
+  arrange(desc(Genre_rb)) %>%
+  mutate(lab.ypos = cumsum(value) - 0.5*value)
+
+w4 <- ggplot(t4, aes(x = "", y = value, fill = Genre_rb)) +
+  geom_bar(width = 1, stat = "identity") +
+  coord_polar("y", start = 0)+
+  geom_text(aes(y = lab.ypos, label = paste0(value, "%")))+
+  theme_void()
+
+t5 <- data.frame(Genre_rap = as.factor(c(0, 1)),
+                 value = round(summary(songs$genre_rap)/nrow(songs)*100)) %>%
+  arrange(desc(Genre_rap)) %>%
+  mutate(lab.ypos = cumsum(value) - 0.5*value)
+
+w5 <- ggplot(t5, aes(x = "", y = value, fill = Genre_rap)) +
+  geom_bar(width = 1, stat = "identity") +
+  coord_polar("y", start = 0)+
+  geom_text(aes(y = lab.ypos, label = paste0(value, "%")))+
+  theme_void() 
+
+t6 <- data.frame(Genre_rock = as.factor(c(0, 1)),
+                 value = round(summary(songs$genre_rock)/nrow(songs)*100)) %>%
+  arrange(desc(Genre_rock)) %>%
+  mutate(lab.ypos = cumsum(value) - 0.5*value)
+
+w6 <- ggplot(t6, aes(x = "", y = value, fill = Genre_rock)) +
+  geom_bar(width = 1, stat = "identity") +
+  coord_polar("y", start = 0)+
+  geom_text(aes(y = lab.ypos, label = paste0(value, "%")))+
+  theme_void() 
+
+t7 <- data.frame(Mode = as.factor(c(0, 1)),
+                 value = round(summary(songs$mode)/nrow(songs)*100)) %>%
+  arrange(desc(Mode)) %>%
+  mutate(lab.ypos = cumsum(value) - 0.5*value)
+
+w7 <- ggplot(t7, aes(x = "", y = value, fill = Mode)) +
+  geom_bar(width = 1, stat = "identity") +
+  coord_polar("y", start = 0)+
+  geom_text(aes(y = lab.ypos, label = paste0(value, "%")))+
+  theme_void() 
+
+grid.arrange(w1, w2, w3, w4, w5, w6, w7, ncol = 3, nrow = 3)
+```
+
+Let’s check whether binary variables affect the popularity of songs.
+
+```{r}
+w1 <- ggplot(songs, aes(x=genre_edm)) +
+  geom_boxplot(aes(y=track_popularity),fill="coral") + 
+  xlab("Genre = edm") + 
+  ylab(NULL) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  ggtitle("Track popularity")
+
+w2 <- ggplot(songs, aes(x=genre_latin)) +
+  geom_boxplot(aes(y=track_popularity),fill="coral") + 
+  xlab("Genre = latin") + 
+  ylab(NULL) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  ggtitle("Track popularity")
+
+w3 <- ggplot(songs, aes(x=genre_pop)) +
+  geom_boxplot(aes(y=track_popularity),fill="coral") + 
+  xlab("Genre = pop") + 
+  ylab(NULL) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  ggtitle("Track popularity")
+
+w4 <- ggplot(songs, aes(x=genre_rb)) +
+  geom_boxplot(aes(y=track_popularity),fill="coral") + 
+  xlab("Genre = rb") + 
+  ylab(NULL) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  ggtitle("Track popularity")
+
+w5 <- ggplot(songs, aes(x=genre_rap)) +
+  geom_boxplot(aes(y=track_popularity),fill="coral") + 
+  xlab("Genre = rap") + 
+  ylab(NULL) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  ggtitle("Track popularity")
+
+w6 <- ggplot(songs, aes(x=genre_rock)) +
+  geom_boxplot(aes(y=track_popularity),fill="coral") + 
+  xlab("Genre = rock") + 
+  ylab(NULL) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  ggtitle("Track popularity")
+
+w7 <- ggplot(songs, aes(x=mode)) +
+  geom_boxplot(aes(y=track_popularity),fill="coral") + 
+  xlab("Mode") + 
+  ylab(NULL) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  ggtitle("Track popularity")
+
+grid.arrange(w1, w2, w3, w4, w5, w6, w7, ncol = 4, nrow = 2)
+```
+
+There are no clearly visible dependencies. In the case of genres latin and pop a slight increase in popularity is noticeable (because when these variables take the value of 1 then the box plots are slightly higher than the box plots for the value of 0). Only for the case of the edm category, if the song is not on such playlists, it is more popular, as indicated by the arrangement of “boxes” on the chart. In other cases, if a song is on a given playlist, it is either more popular or on par with others.
+
+Let’s transform the dataset. Let’s create a binary variable taking the value 1 if the song is popular and the value 0 when it is not. The new variable `popular` will have a value of 1 when the variable `track_popularity` is greater than 42 (which is the value of median) and a value of 0 otherwise.
+
+```{r}
+songs$popular <- ifelse(songs$track_popularity > 42, 1, 0) 
+songs$popular <- as.factor(songs$popular)
+
+songs %>%
+  group_by(popular) %>%
+  summarise(numberOfObservations = n()) %>%
+  kable() %>%
+  kable_styling(full_width = F, position = "center", font_size = 10)
+```
+
+Let’s check if all the variables analyzed earlier have an effect on the new binary variable.
+
+Quantitative variables and `popluar` variable:
+
+```{r}
+w1 <- ggplot(songs, aes(x=playlist_number, fill=popular)) + geom_histogram(bins=5, alpha = 0.8) + 
+  ggtitle("Playlist number") +
+  xlab(NULL) + ylab(NULL) +
+  theme(plot.title = element_text(size = 10, hjust = 0.5))
+ 
+w2 <- ggplot(songs, aes(x=danceability, fill=popular)) + geom_histogram(bins=10, alpha = 0.8) + 
+  ggtitle("Danceability") +
+  xlab(NULL) + ylab(NULL) +
+  theme(plot.title = element_text(size = 10, hjust = 0.5))
+
+w3 <- ggplot(songs, aes(x=energy, fill=popular)) + geom_histogram(bins=10, alpha = 0.8) + 
+  ggtitle("Energy") +
+  xlab(NULL) + ylab(NULL) +
+  theme(plot.title = element_text(size = 10, hjust = 0.5))
+
+w4 <- ggplot(songs, aes(x=key, fill=popular)) + geom_histogram(bins=10, alpha = 0.8) + 
+  ggtitle("Key") +
+  xlab(NULL) + ylab(NULL) +
+  theme(plot.title = element_text(size = 10, hjust = 0.5)) 
+
+w5 <- ggplot(songs, aes(x=loudness, fill=popular)) + geom_histogram(bins=10, alpha = 0.8) + 
+  ggtitle("Loudness") +
+  xlab(NULL) + ylab(NULL) +
+  theme(plot.title = element_text(size = 10, hjust = 0.5)) 
+
+w6 <- ggplot(songs,aes(x=speechiness, fill=popular)) + geom_histogram(bins=10, alpha = 0.8) + 
+  ggtitle("Speechiness") +
+  xlab(NULL) + ylab(NULL) +
+  theme(plot.title = element_text(size = 10, hjust = 0.5)) 
+
+w7 <- ggplot(songs, aes(x=acousticness, fill=popular)) + geom_histogram(bins=10, alpha = 0.8) + 
+  ggtitle("Acousticness") +
+  xlab(NULL) + ylab(NULL) +
+  theme(plot.title = element_text(size = 10, hjust = 0.5))
+
+w8 <- ggplot(songs, aes(x=instrumentalness, fill=popular)) + geom_histogram(bins=10, alpha = 0.8) + 
+  ggtitle("Instrumentalness") +
+  xlab(NULL) + ylab(NULL) +
+  theme(plot.title = element_text(size = 10, hjust = 0.5))
+
+w9 <- ggplot(songs, aes(x=liveness, fill=popular)) + geom_histogram(bins=10, alpha = 0.8) + 
+  ggtitle("Liveness") +
+  xlab(NULL) + ylab(NULL) +
+  theme(plot.title = element_text(size = 10, hjust = 0.5))
+
+w10 <- ggplot(songs, aes(x=valence, fill=popular)) + geom_histogram(bins=10, alpha = 0.8) + 
+  ggtitle("Valence") +
+  xlab(NULL) + ylab(NULL) +
+  theme(plot.title = element_text(size = 10, hjust = 0.5))
+
+w11 <- ggplot(songs, aes(x=tempo, fill=popular)) + geom_histogram(bins=10, alpha = 0.8) + 
+  ggtitle("Tempo") +
+  xlab(NULL) + ylab(NULL) +
+  theme(plot.title = element_text(size = 10, hjust = 0.5))
+
+w12 <- ggplot(songs, aes(x=duration_ms, fill=popular)) + geom_histogram(bins=10, alpha = 0.8) + 
+  ggtitle("Duration") +
+  xlab(NULL) + ylab(NULL) +
+  theme(plot.title = element_text(size = 10, hjust = 0.5))
+
+w13 <- ggplot(songs, aes(x=year, fill=popular)) + geom_histogram(bins=10, alpha = 0.8) + 
+  ggtitle("Year") +
+  xlab(NULL) + ylab(NULL) +
+  theme(plot.title = element_text(size = 10, hjust = 0.5))
+
+grid.arrange(w1, w2, w3, w4, w5, w6, ncol = 3, nrow = 2)
+```
+
+```{r}
+w13
+```
+
+Binary variables and popluar variable:
+
+```{r}
+ggplot(songs) +
+  geom_bar(aes(x = genre_edm, fill=popular), position=position_dodge()) +
+  xlab("Genre = edm")
+```
+
+The chart shows that the variable\``genre_edm` affects the popularity of songs. Songs that are on the playlist of the “edm” genre are usually less popular. If songs aren’t on these types of playlists then they tend to be more popular.
+
+```{r}
+ggplot(songs) +
+  geom_bar(aes(x = genre_latin, fill=popular), position=position_dodge()) +
+  xlab("Genre = latin")
+```
+
+The chart shows that the variable `genre_latin` affects the popularity of songs. Songs that are on the playlist of the “latin” genre are usually more popular. If songs aren’t on these types of playlists then they tend to be less popular.
+
+```{r}
+ggplot(songs) +
+  geom_bar(aes(x = genre_pop, fill=popular), position=position_dodge()) +
+  xlab("Genre = pop")
+```
+
+This graph shows the same relationship as the earlier one. Songs that are on the playlist of the “pop” genre are usually more popular. If songs aren’t on these types of playlists then they tend to be less popular.
+
+```{r}
+ggplot(songs) +
+  geom_bar(aes(x = genre_rb, fill=popular), position=position_dodge()) +
+  xlab("Genre = rb")
+```
+
+In this chart, the shares are similar. There is no conection between the popularity of a song and the occurrence of songs on playlists with the genre “rb”.
+
+```{r}
+ggplot(songs) +
+  geom_bar(aes(x = genre_rap, fill=popular), position=position_dodge()) +
+  xlab("Genre = rap")
+```
+
+The chart shows that the variable `genre_rap` affects the popularity of songs. Songs that are on the playlist of the “rap” genre are usually more popular. If songs aren’t on these types of playlists then they tend to be less popular.
+
+```{r}
+ggplot(songs) +
+  geom_bar(aes(x = genre_rock, fill=popular), position=position_dodge()) +
+  xlab("Genre = rock")
+```
+
+This graph shows the same relationship as the earlier one. In this case, however, the shares are more similar.
+
+```{r}
+ggplot(songs) +
+  geom_bar(aes(x = mode, fill=popular), position=position_dodge()) +
+  xlab("Mode")
+```
+
+In this chart, the shares are similar. There is no connection between the popularity of a song and the modality of a track.
+
+Summary:
+
+Quantitative variables have little or no effect on the popularity of songs (both on the `track_popularity` variable and `popular` variable). Binary variables affect song popularity to a slightly greater extent.
+
+Based on the correlation coefficients, however, it can be seen that the `energy` variable is significantly correlated with several other variables.
+
+Accordingly, the following section will build 3 types of models: 1) explaining continuous variable `track_popularity`, 2) explaining a binary variable `popular`, 3) explaining a continuous variable `energy`.
+
+## Modeling
+
+### **Explaining continuous variable `track_popularity`**
+
+Splitting the data into a training and testing data
+
+The dataset is divided into a teaching set (75% of observations) and a test set (25% of observations)
+
+```{r}
+set.seed(9)
+
+# Split object
+split <- initial_split(songs[,-c(1:3, 25)], prop = 0.75, strata = track_popularity)
+# Build training data set
+train <- split %>% training()
+# Build testing data set
+test <- split %>% testing()
+```
+
+### Linear regression
+
+```{r}
+# Feature Engineering
+songs_recipe <- recipe(
+  track_popularity ~ .,
+  data = train) %>% 
+  step_YeoJohnson(all_numeric(), -all_outcomes()) %>% 
+  step_normalize(all_numeric(), -all_outcomes())
+
+# Specify a Model
+lm_model <- linear_reg() %>% 
+  set_engine('lm') %>% 
+  set_mode('regression')
+
+# Create a Workflow
+songs_workflow <- workflow() %>% 
+  add_model(lm_model) %>% 
+  add_recipe(songs_recipe)
+
+# Execute the Workflow
+songs_fit <- songs_workflow %>% 
+  last_fit(split = split)
+
+songs_fit %>% 
+  collect_metrics()
+```
+
+Parameters of the model:
+
+```{r}
+model_fitted <- songs_workflow %>% 
+  fit(data = train)
+summary(model_fitted$fit$fit$fit)
+```
+
+Based on the above data on the model parameters, it can be seen that there are many significant variables affecting the results - this is indicated by “asterisks” placed next to the variables. Nevertheless, this model is not very good. R-squared values between 0 and 1 are around 0.15, suggesting that only 15% has been explained. Therefore, the proposed model is not very good.
+
+Data frame with the response variables values from the test set and a column named .pred with the model predictions:
+
+```{r}
+songs_results <- songs_fit %>% 
+  collect_predictions()
+songs_results %>% kable() %>% 
+  kable_styling(full_width = F, position = "center", font_size = 9) %>% 
+  scroll_box(height = "300px")
+```
+
+Model performance on the test data set:
+
+```{r}
+songs_results %>% 
+  ggplot(aes(x = .pred, y = track_popularity)) +
+  geom_point(color = '#006EA1', alpha = 0.25) +
+  geom_abline(intercept = 0, slope = 1, color = 'orange') +
+  labs(
+    title = 'Linear Regression Results - Track Popularity Test Set',
+    x = 'Predicted Track Popularity',
+    y = 'Actual Track Popularity'
+    )
+```
+
+When presenting the fit, it can be seen that the values are not arranged in a straight line, but are distributed both above and below the line.
+
+Variable Importance:
+
+```{r}
+model_songs_fitted <- songs_workflow %>% 
+  fit(data = train)
+vip(model_songs_fitted$fit$fit)
+```
+
+### **Explaining a binary variable `popular`**
+
+Splitting the data into a training and testing set
+
+The levels of `popular` variable:
+
+```{r}
+levels(songs$popular)
+```
+
+In this case, event of interest is `popular == 1`, so all popular songs should be included in the positive class.
+
+Currently the first level is ‘0’, so this must be changed.
+
+Reorders the levels of the `popular` variable:
+
+```{r}
+songs <- songs %>%
+  mutate(popular = factor(popular, levels=c("1", "0")))
+levels(songs$popular)
+```
+
+The dataset is divided into a teaching set (75% of observations) and a test set (25% of observations).
+
+```{r}
+set.seed(9)
+
+# Split object
+split <- initial_split(songs[,-c(1:3, 11)], prop = 0.75, strata = popular)
+# Build training data set
+train <- split %>% training()
+# Build testing data set
+test <- split %>% testing()
+```
+
+#### **Model 1 - Logistic Regression**
+
+```{r}
+# Feature Engineering
+songs_recipe <- recipe(
+  popular ~ .,
+  data = train) %>% 
+  step_YeoJohnson(all_numeric(), -all_outcomes()) %>% 
+  step_normalize(all_numeric(), -all_outcomes())
+
+
+# Model Specification
+logistic_model <- logistic_reg() %>% 
+  set_engine('glm') %>% 
+  set_mode('classification')
+
+# Create a Workflow
+songs_workflow <- workflow() %>% 
+  add_model(logistic_model) %>% 
+  add_recipe(songs_recipe)
+
+# Fit the Model
+songs_logistic_fit <- songs_workflow %>% 
+  fit(data = train)
+
+songs_trained_model <- songs_logistic_fit %>% 
+  extract_fit_parsnip()
+songs_trained_model
+```
+
+Variable Importance:
+
+```{r}
+songs_trained_model %>% 
+  vip()
+```
+
+Table with predicted categories, estimated probabilities for each category and true response variable values in test data set:
+
+```{r}
+predictions_categories <- songs_logistic_fit %>% 
+  predict(new_data = test)
+predictions_probabilities <- songs_logistic_fit %>% 
+  predict(new_data = test, type = 'prob')
+
+results_lg <- data.frame(prediction_class = predictions_categories$.pred_class,
+                         probabilities_class0 = predictions_probabilities$.pred_0,
+                         probabilities_class1 = predictions_probabilities$.pred_1,
+                         popular=test$popular)
+
+results_lg %>% kable() %>% 
+  kable_styling(full_width = F, position = "center", font_size = 9) %>% 
+  scroll_box(height = "300px")
+```
+
+Exploring performance metrics:
+
+```{r}
+results_lg %>% 
+  conf_mat(truth = popular, estimate = prediction_class)
+```
+
+Based on the above data, it can be seen that 2157 popular ones were classified well - as popular, and 2256 belonging to less popular were also classified in the correct category. In the case of data that was popular and misclassified, there were 1370 observations, while those that were not popular and were classified as popular were 1307.
+
+F1 Score
+
+```{r}
+results_lg %>% 
+  f_meas(truth = popular, estimate = prediction_class)
+```
+
+ROC Curve
+
+```{r}
+ROC <- roc(results_lg$popular, results_lg$probabilities_class1)
+
+ggroc(ROC, size=1.5) + 
+  geom_abline(intercept = 1, color = "darkgrey", linetype = "dashed")
+```
+
+Area Under the ROC Curve
+
+```{r}
+auc(ROC)
+```
+
+Based on the graph above and the area under the curve value of 0.6722, it can be said that the model is better than the random classifier (it has a value above 0.5) but it is not perfectly fitted to the straight line either.
+
+#### **Model 2 - K-Nearest Neighbor**
+
+```{r}
+set.seed(9)
+songs_folds <- vfold_cv(train, v = 5)
+
+knn_model <- nearest_neighbor(neighbors = tune()) %>% 
+             set_engine('kknn') %>% 
+             set_mode('classification')
+
+knn_workflow <- workflow() %>% 
+          add_model(knn_model) %>% 
+          add_recipe(songs_recipe)
+
+# A grid of hyperparameter values to test
+k_grid <- tibble(neighbors = seq(5,195,20))
+
+## Tune  workflow
+knn_tuning <- knn_workflow %>% 
+  tune_grid(resamples = songs_folds,
+            grid = k_grid)
+
+knn_tuning %>%
+  show_best('roc_auc')
+```
+
+```{r}
+ ## Select best model based on roc_auc
+best_k <- knn_tuning %>% 
+  select_best(metric = 'roc_auc')
+best_k
+```
+
+```{r}
+final_knn_workflow <- knn_workflow %>% 
+  finalize_workflow(best_k)
+
+last_fit_knn <- final_knn_workflow %>% 
+  last_fit(split = split)
+last_fit_knn %>%
+  collect_metrics()
+```
+
+```{r}
+knn_predictions <- last_fit_knn %>% 
+  collect_predictions()
+knn_predictions
+```
+
+```{r}
+ROC <- roc(knn_predictions$popular, knn_predictions$.pred_1)
+
+ggroc(ROC, size=1.5) + 
+  geom_abline(intercept = 1, color = "darkgrey", linetype = "dashed")
+```
+
+```{r}
+auc(ROC)
+```
+
+As before, based on the above graph and the value of area under the curve of 0.6951, it can be said that the model is better than the random classifier (it has a value above 0.5), but it is not perfectly fitted to the line either.
+
+```{r}
+conf_mat(knn_predictions, truth = popular, estimate = .pred_class)
+```
+
+Also the values presented in the confusion matrix are similar to those in the previous model - 2312 positive ones were classified correctly, 2215 negative ones were also classified correctly. In the case of missclassification, they concerned 1215 positive and 1348 negative.
+
+#### **Model 3 - tree classifier**
+
+```{r}
+tree_model <- decision_tree(
+  cost_complexity = tune(),
+  tree_depth = tune(),
+  min_n = tune()
+  ) %>%
+  set_engine('rpart') %>% 
+  set_mode('classification')
+
+tree_workflow <- workflow() %>%
+  add_model(tree_model) %>% 
+  add_recipe(songs_recipe)
+
+tree_grid <- grid_regular(
+  cost_complexity(),
+  tree_depth(),
+  min_n(),
+  levels = 2
+  )
+
+set.seed(9)
+
+tree_tuning <- tree_workflow %>% 
+  tune_grid(
+    resamples = songs_folds,
+    grid = tree_grid
+    )
+
+tree_tuning %>%
+  show_best('roc_auc')
+```
+
+```{r}
+best_tree <- tree_tuning %>% 
+  select_best(metric = 'roc_auc')
+best_tree
+```
+
+```{r}
+final_tree_workflow <- tree_workflow %>%
+  finalize_workflow(best_tree)
+
+tree_wf_fit <- final_tree_workflow %>%
+  fit(data = train)
+
+tree_fit <- tree_wf_fit %>% 
+  extract_fit_parsnip()
+
+vip(tree_fit)
+```
+
+```{r}
+rpart.plot(tree_fit$fit, roundint = FALSE)
+```
+
+```{r}
+tree_last_fit <- final_tree_workflow %>%
+  last_fit(split)
+
+tree_last_fit %>%
+  collect_metrics()
+```
+
+```{r}
+tree_predictions <- tree_last_fit %>%
+  collect_predictions()
+
+ROC <- roc(tree_predictions$popular, tree_predictions$.pred_1)
+
+ggroc(ROC, size=1.5) + 
+  geom_abline(intercept = 1, color = "darkgrey", linetype = "dashed")
+```
+
+```{r}
+auc(ROC)
+```
+
+```{r}
+conf_mat(
+  tree_predictions,
+  truth = popular,
+  estimate = .pred_class
+  )
+```
+
+### **Explaining a continuous variable `energy`**
+
+Splitting the data into a training and testing set
+
+The dataset is divided into a teaching set (75% of observations) and a test set (25% of observations).
+
+```{r}
+set.seed(9)
+
+# Split object
+split <- initial_split(songs[,-c(1:3, 25)], prop = 0.75, strata = energy)
+# Build training data set
+train <- split %>% training()
+# Build testing data set
+test <- split %>% testing()
+```
+
+#### **Linear regression**
+
+```{r}
+# Feature Engineering
+songs_recipe <- recipe(
+  energy ~ .,
+  data = train) %>% 
+  step_YeoJohnson(all_numeric(), -all_outcomes()) %>% 
+  step_normalize(all_numeric(), -all_outcomes())
+
+# Specify a Model
+lm_model <- linear_reg() %>% 
+  set_engine('lm') %>% 
+  set_mode('regression')
+
+# Create a Workflow
+songs_workflow <- workflow() %>% 
+  add_model(lm_model) %>% 
+  add_recipe(songs_recipe)
+
+# Execute the Workflow
+songs_fit <- songs_workflow %>% 
+  last_fit(split = split)
+
+songs_fit %>% 
+  collect_metrics() %>% kable()
+```
+
+```{r}
+model_fitted <- songs_workflow %>% 
+  fit(data = train)
+summary(model_fitted$fit$fit$fit)
+```
+
+Data frame with the response variables values from the test set and a column named .pred with the model predictions:
+
+```{r}
+songs_results <- songs_fit %>% 
+  collect_predictions()
+songs_results %>% kable() %>% 
+  kable_styling(full_width = F, position = "center", font_size = 9) %>% 
+  scroll_box(height = "300px")
+```
+
+Model performance on the test data set:
+
+```{r}
+songs_results %>% 
+  ggplot(aes(x = .pred, y = energy)) +
+  geom_point(color = '#006EA1', alpha = 0.25) +
+  geom_abline(intercept = 0, slope = 1, color = 'orange') +
+  labs(
+    title = 'Linear Regression Results - Energy Test Set',
+    x = 'Predicted Energy',
+    y = 'Actual Energy'
+    )
+```
+
+Variable Importance:
+
+```{r}
+model_songs_fitted <- songs_workflow %>% 
+  fit(data = train)
+vip(model_songs_fitted$fit$fit)
+```
+
+Finally, the linear regression model was re-created, but as the variable was taken energy. In this case, it can already be seen that most of the parameters in the model are significant - only 3 variables are not significant. Also the R-squared values suggest that the created model is better - 64% is explained by the model. When examining the correlation between the variables earlier, it was possible to notice that the correlation coefficient for the variable of this model was higher withtwo other variables. In the case of the remaining ones, there was either a negligible correlation or sometimes none at all.
